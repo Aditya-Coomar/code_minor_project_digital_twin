@@ -7,7 +7,7 @@ from models.prediction_head import PredictionHead
 
 
 class StateSpaceTwin(nn.Module):
-    def __init__(self, state_dim, control_dim, hidden_dim=256):
+    def __init__(self, state_dim, control_dim, hidden_dim=384):
 
         super().__init__()
 

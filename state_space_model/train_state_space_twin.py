@@ -15,14 +15,14 @@ from models.state_space_twin import StateSpaceTwin
 
 def rollout_horizon(epoch):
 
-    if epoch < 5:
+    if epoch < 10:
         return 1
-    elif epoch < 15:
+    elif epoch < 25:
         return 3
-    elif epoch < 30:
+    elif epoch < 45:
         return 5
     else:
-        return 8
+        return 10
 
 
 def main():
@@ -37,8 +37,8 @@ def main():
         print("GPU:", torch.cuda.get_device_name(0))
 
     BATCH_SIZE = 512
-    EPOCHS = 60
-    LR = 1e-3
+    EPOCHS = 80
+    LR = 3e-4
 
     dataset = TEPDataset("X_seq.npy", "U_seq.npy", "y.npy")
 
@@ -46,17 +46,16 @@ def main():
         dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True
     )
 
-    model = StateSpaceTwin(state_dim=41, control_dim=11, hidden_dim=256).to(DEVICE)
+    model = StateSpaceTwin(state_dim=41, control_dim=11, hidden_dim=384).to(DEVICE)
 
-    optimizer = optim.Adam(model.parameters(), lr=LR)
+    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-5)
 
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
     criterion = nn.MSELoss()
 
     scaler = torch.amp.GradScaler("cuda", enabled=(DEVICE.type == "cuda"))
 
-    # store results
     results = []
 
     for epoch in range(EPOCHS):
@@ -70,9 +69,9 @@ def main():
         targets_all = []
 
         for X_batch, U_batch, y_batch in loader:
-            X_batch = X_batch.to(DEVICE, non_blocking=True)
-            U_batch = U_batch.to(DEVICE, non_blocking=True)
-            y_batch = y_batch.to(DEVICE, non_blocking=True)
+            X_batch = X_batch.to(DEVICE)
+            U_batch = U_batch.to(DEVICE)
+            y_batch = y_batch.to(DEVICE)
 
             optimizer.zero_grad()
 
@@ -84,17 +83,19 @@ def main():
                 loss = 0
 
                 for k in range(horizon):
-                    u = U_batch[:, -1, :]
+                    u = U_batch[:, -horizon + k, :]
 
-                    h = model.dynamics(h, u)
+                    h_next = model.dynamics(h, u)
 
-                    delta = model.head(h)
+                    delta = model.head(h_next)
 
-                    x_pred = x_current + delta
+                    x_next = x_current + delta
 
-                    loss += criterion(x_pred, y_batch)
+                    loss += criterion(x_next, y_batch)
 
-                    x_current = x_pred
+                    # propagate state
+                    x_current = x_next
+                    h = h_next
 
                 loss = loss / horizon
 
@@ -103,12 +104,11 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
             scaler.step(optimizer)
-
             scaler.update()
 
             epoch_loss += loss.item()
 
-            preds_all.append(x_pred.detach().cpu().numpy())
+            preds_all.append(x_next.detach().cpu().numpy())
             targets_all.append(y_batch.detach().cpu().numpy())
 
         scheduler.step()
@@ -142,39 +142,21 @@ def main():
             }
         )
 
-    # Save model
     torch.save(model.state_dict(), "state_space_twin_rollout.pt")
 
-    print("\nModel saved")
-
-    # Save results CSV
     df = pd.DataFrame(results)
 
     df.to_csv("training_results.csv", index=False)
 
-    print("Saved training_results.csv")
-
-    # Save JSON
     with open("training_results.json", "w") as f:
         json.dump(results, f, indent=4)
 
-    print("Saved training_results.json")
-
-    # Plot training curves
     plt.figure(figsize=(10, 5))
-
-    plt.subplot(1, 2, 1)
-    plt.plot(df["epoch"], df["loss"])
-    plt.title("Training Loss")
-
-    plt.subplot(1, 2, 2)
     plt.plot(df["epoch"], df["r2"])
-    plt.title("R² Score")
-
-    plt.tight_layout()
+    plt.title("R2 vs Epoch")
     plt.savefig("training_curve.png")
 
-    print("Saved training_curve.png")
+    print("\nModel saved and results exported")
 
 
 if __name__ == "__main__":
