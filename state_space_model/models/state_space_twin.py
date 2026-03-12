@@ -1,9 +1,63 @@
 import torch
 import torch.nn as nn
 
-from models.state_encoder import StateEncoder
-from models.state_space_dynamics import StateSpaceDynamics
-from models.prediction_head import PredictionHead
+
+class StateEncoder(nn.Module):
+    def __init__(self, state_dim, control_dim, hidden_dim):
+
+        super().__init__()
+
+        self.state_proj = nn.Linear(state_dim, hidden_dim)
+        self.control_proj = nn.Linear(control_dim, hidden_dim)
+
+        self.lstm = nn.LSTM(
+            hidden_dim * 2,
+            hidden_dim,
+            num_layers=2,
+            batch_first=True,
+            bidirectional=True,
+        )
+
+        self.out = nn.Linear(hidden_dim * 2, hidden_dim)
+
+    def forward(self, X_seq, U_seq):
+
+        X = self.state_proj(X_seq)
+        U = self.control_proj(U_seq)
+
+        inp = torch.cat([X, U], dim=-1)
+
+        _, (h, _) = self.lstm(inp)
+
+        h = torch.cat([h[-2], h[-1]], dim=-1)
+
+        return self.out(h)
+
+
+class StateSpaceDynamics(nn.Module):
+    def __init__(self, hidden_dim, control_dim):
+
+        super().__init__()
+
+        self.control_embed = nn.Linear(control_dim, hidden_dim)
+
+        self.A = nn.Linear(hidden_dim, hidden_dim)
+
+        self.residual = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+    def forward(self, h, u):
+
+        u = self.control_embed(u)
+
+        linear = self.A(h)
+
+        nonlinear = self.residual(torch.cat([h, u], dim=-1))
+
+        return linear + nonlinear
 
 
 class StateSpaceTwin(nn.Module):
@@ -15,16 +69,21 @@ class StateSpaceTwin(nn.Module):
 
         self.dynamics = StateSpaceDynamics(hidden_dim, control_dim)
 
-        self.head = PredictionHead(hidden_dim, state_dim)
+        self.head = nn.Linear(hidden_dim, state_dim)
 
-    def forward(self, X_seq, U_seq):
+    def forward(self, X_seq, U_seq, pred_horizon):
 
         h = self.encoder(X_seq, U_seq)
 
-        u_last = U_seq[:, -1, :]
+        x = X_seq[:, -1, :]
 
-        h_next = self.dynamics(h, u_last)
+        for _ in range(pred_horizon):
+            u = U_seq[:, -1, :]
 
-        x_next = self.head(h_next)
+            h = self.dynamics(h, u)
 
-        return x_next
+            dx = self.head(h)
+
+            x = x + dx
+
+        return x

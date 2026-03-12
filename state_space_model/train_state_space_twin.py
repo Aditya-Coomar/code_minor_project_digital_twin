@@ -3,47 +3,44 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import pandas as pd
-import json
-import matplotlib.pyplot as plt
+import os
 
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import r2_score, mean_absolute_error
+
 from torch.utils.data import DataLoader
 
 from dataset_stream import TEPDataset
 from models.state_space_twin import StateSpaceTwin
 
 
-def rollout_horizon(epoch):
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+BATCH_SIZE = 1024
+EPOCHS = 80
+LR = 3e-4
+
+
+def rollout_schedule(epoch):
 
     if epoch < 10:
-        return 1
-    elif epoch < 25:
-        return 3
-    elif epoch < 45:
         return 5
-    else:
+    elif epoch < 30:
         return 10
+    else:
+        return 20
 
 
-def main():
-
-    torch.backends.cudnn.benchmark = True
-
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    print("Device:", DEVICE)
-
-    if DEVICE.type == "cuda":
-        print("GPU:", torch.cuda.get_device_name(0))
-
-    BATCH_SIZE = 512
-    EPOCHS = 80
-    LR = 3e-4
+def train():
 
     dataset = TEPDataset("X_seq.npy", "U_seq.npy", "y.npy")
 
     loader = DataLoader(
-        dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True
+        dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=os.cpu_count(),
+        pin_memory=True,
+        persistent_workers=True,
     )
 
     model = StateSpaceTwin(state_dim=41, control_dim=11, hidden_dim=384).to(DEVICE)
@@ -54,50 +51,31 @@ def main():
 
     criterion = nn.MSELoss()
 
-    scaler = torch.amp.GradScaler("cuda", enabled=(DEVICE.type == "cuda"))
+    scaler = torch.amp.GradScaler()
 
     results = []
 
     for epoch in range(EPOCHS):
         model.train()
 
-        horizon = rollout_horizon(epoch)
+        horizon = rollout_schedule(epoch)
+
+        preds = []
+        targets = []
 
         epoch_loss = 0
 
-        preds_all = []
-        targets_all = []
-
-        for X_batch, U_batch, y_batch in loader:
-            X_batch = X_batch.to(DEVICE)
-            U_batch = U_batch.to(DEVICE)
-            y_batch = y_batch.to(DEVICE)
+        for X, U, y in loader:
+            X = X.to(DEVICE)
+            U = U.to(DEVICE)
+            y = y.to(DEVICE)
 
             optimizer.zero_grad()
 
-            with torch.amp.autocast("cuda", enabled=(DEVICE.type == "cuda")):
-                h = model.encoder(X_batch, U_batch)
+            with torch.amp.autocast("cuda"):
+                pred = model(X, U, horizon)
 
-                x_current = X_batch[:, -1, :]
-
-                loss = 0
-
-                for k in range(horizon):
-                    u = U_batch[:, -horizon + k, :]
-
-                    h_next = model.dynamics(h, u)
-
-                    delta = model.head(h_next)
-
-                    x_next = x_current + delta
-
-                    loss += criterion(x_next, y_batch)
-
-                    # propagate state
-                    x_current = x_next
-                    h = h_next
-
-                loss = loss / horizon
+                loss = criterion(pred, y)
 
             scaler.scale(loss).backward()
 
@@ -108,27 +86,23 @@ def main():
 
             epoch_loss += loss.item()
 
-            preds_all.append(x_next.detach().cpu().numpy())
-            targets_all.append(y_batch.detach().cpu().numpy())
+            preds.append(pred.detach().cpu().numpy())
+            targets.append(y.cpu().numpy())
 
         scheduler.step()
 
+        preds = np.vstack(preds)
+        targets = np.vstack(targets)
+
+        mse = ((preds - targets) ** 2).mean()
+        mae = mean_absolute_error(targets, preds)
+        r2 = r2_score(targets, preds)
+
         avg_loss = epoch_loss / len(loader)
 
-        preds_all = np.vstack(preds_all)
-        targets_all = np.vstack(targets_all)
-
-        mse = mean_squared_error(targets_all, preds_all)
-        mae = mean_absolute_error(targets_all, preds_all)
-        r2 = r2_score(targets_all, preds_all)
-
         print(
-            f"Epoch {epoch + 1:03d} | "
-            f"Horizon {horizon} | "
-            f"Loss {avg_loss:.6f} | "
-            f"MSE {mse:.6f} | "
-            f"MAE {mae:.6f} | "
-            f"R2 {r2:.6f}"
+            f"Epoch {epoch + 1:03d} | Horizon {horizon} | "
+            f"Loss {avg_loss:.4f} | MSE {mse:.4f} | MAE {mae:.4f} | R2 {r2:.4f}"
         )
 
         results.append(
@@ -142,22 +116,16 @@ def main():
             }
         )
 
-    torch.save(model.state_dict(), "state_space_twin_rollout.pt")
+    torch.save(model.state_dict(), "state_space_twin.pt")
 
-    df = pd.DataFrame(results)
+    pd.DataFrame(results).to_csv("training_results.csv", index=False)
 
-    df.to_csv("training_results.csv", index=False)
-
-    with open("training_results.json", "w") as f:
-        json.dump(results, f, indent=4)
-
-    plt.figure(figsize=(10, 5))
-    plt.plot(df["epoch"], df["r2"])
-    plt.title("R2 vs Epoch")
-    plt.savefig("training_curve.png")
-
-    print("\nModel saved and results exported")
+    print("Training finished")
 
 
 if __name__ == "__main__":
-    main()
+    import torch.multiprocessing as mp
+
+    mp.set_start_method("spawn", force=True)
+
+    train()

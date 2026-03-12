@@ -1,36 +1,21 @@
 import numpy as np
-import pandas as pd
-import torch
 import pyreadr
-
 from sklearn.preprocessing import StandardScaler
 
 
 class TEPDataProcessor:
     def __init__(self, seq_len=200):
-
         self.seq_len = seq_len
         self.x_scaler = StandardScaler()
         self.u_scaler = StandardScaler()
 
-    def load_rdata(self, path):
+    def load_rdata(self, file_path):
 
-        result = pyreadr.read_r(path)
+        result = pyreadr.read_r(file_path)
+        df = result[None]
 
-        # Extract dataframe regardless of object name
-        df = list(result.values())[0]
-
-        df = pd.DataFrame(df)
-
-        return df
-
-    def split_variables(self, df):
-
-        state_cols = [c for c in df.columns if "xmeas_" in c]
-        control_cols = [c for c in df.columns if "xmv_" in c]
-
-        X = df[state_cols].values
-        U = df[control_cols].values
+        X = df.iloc[:, :41].values.astype(np.float32)
+        U = df.iloc[:, 41:].values.astype(np.float32)
 
         return X, U
 
@@ -41,35 +26,22 @@ class TEPDataProcessor:
 
         return X, U
 
-    def create_sequences(self, df):
+    def process(self, file_path, horizon):
 
-        state_cols = [c for c in df.columns if "xmeas" in c.lower()]
-        control_cols = [c for c in df.columns if "xmv" in c.lower()]
+        X, U = self.load_rdata(file_path)
+        X, U = self.normalize(X, U)
 
         X_seq = []
         U_seq = []
         y = []
 
-        for run in df["simulationRun"].unique():
-            run_df = df[df["simulationRun"] == run]
+        for i in range(self.seq_len, len(X) - horizon):
+            X_seq.append(X[i - self.seq_len : i])
+            U_seq.append(U[i - self.seq_len : i])
+            y.append(X[i + horizon])
 
-            X = run_df[state_cols].values
-            U = run_df[control_cols].values
-
-            X = self.x_scaler.fit_transform(X)
-            U = self.u_scaler.fit_transform(U)
-
-            PRED_HORIZON = 20
-
-            for i in range(self.seq_len, len(X) - PRED_HORIZON):
-                X_seq.append(X[i - self.seq_len : i])
-                U_seq.append(U[i - self.seq_len : i])
-                y.append(X[i + PRED_HORIZON])
-
-        return (np.array(X_seq), np.array(U_seq), np.array(y))
-
-    def process(self, path):
-
-        df = self.load_rdata(path)
-
-        return self.create_sequences(df)
+        return (
+            np.array(X_seq, dtype=np.float32),
+            np.array(U_seq, dtype=np.float32),
+            np.array(y, dtype=np.float32),
+        )
