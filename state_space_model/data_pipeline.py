@@ -7,7 +7,6 @@ from sklearn.preprocessing import StandardScaler
 
 
 class TEPDataProcessor:
-
     def __init__(self, seq_len=200):
 
         self.seq_len = seq_len
@@ -52,7 +51,6 @@ class TEPDataProcessor:
         y = []
 
         for run in df["simulationRun"].unique():
-
             run_df = df[df["simulationRun"] == run]
 
             X = run_df[state_cols].values
@@ -61,17 +59,14 @@ class TEPDataProcessor:
             X = self.x_scaler.fit_transform(X)
             U = self.u_scaler.fit_transform(U)
 
-            for i in range(self.seq_len, len(X) - 1):
+            PRED_HORIZON = 20
 
-                X_seq.append(X[i-self.seq_len:i])
-                U_seq.append(U[i-self.seq_len:i])
-                y.append(X[i+1])
+            for i in range(self.seq_len, len(X) - PRED_HORIZON):
+                X_seq.append(X[i - self.seq_len : i])
+                U_seq.append(U[i - self.seq_len : i])
+                y.append(X[i + PRED_HORIZON])
 
-        return (
-            np.array(X_seq),
-            np.array(U_seq),
-            np.array(y)
-        )
+        return (np.array(X_seq), np.array(U_seq), np.array(y))
 
     def process(self, path):
 
