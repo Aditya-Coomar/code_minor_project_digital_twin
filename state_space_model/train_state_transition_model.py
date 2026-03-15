@@ -12,7 +12,13 @@ from models.state_transition_model import StateTransitionModel
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-BATCH_SIZE = 256
+print("Device:", DEVICE)
+
+if DEVICE.type == "cuda":
+    print("GPU:", torch.cuda.get_device_name(0))
+
+
+BATCH_SIZE = 64
 EPOCHS = 80
 
 
@@ -22,10 +28,15 @@ loader = DataLoader(
     dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True
 )
 
+
 sample = dataset[0]
 
 state_dim = sample[0].shape[0]
 control_dim = sample[1].shape[0]
+
+print("State dim:", state_dim)
+print("Control dim:", control_dim)
+
 
 model = StateTransitionModel(state_dim, control_dim).to(DEVICE)
 
@@ -34,9 +45,35 @@ optimizer = optim.Adam(model.parameters(), lr=3e-4)
 criterion = nn.MSELoss()
 
 
-for epoch in range(EPOCHS):
+def rollout(x, u, horizon):
+
     preds = []
-    targets = []
+
+    for _ in range(horizon):
+        x = model(x, u)
+
+        preds.append(x)
+
+    return torch.stack(preds, dim=1)
+
+
+def rollout_schedule(epoch):
+
+    if epoch < 10:
+        return 1
+    elif epoch < 30:
+        return 5
+    elif epoch < 60:
+        return 10
+    else:
+        return 20
+
+
+for epoch in range(EPOCHS):
+    horizon = rollout_schedule(epoch)
+
+    preds_all = []
+    targets_all = []
 
     for x, u, y in loader:
         x = x.to(DEVICE)
@@ -45,20 +82,24 @@ for epoch in range(EPOCHS):
 
         optimizer.zero_grad()
 
-        pred = model(x, u)
+        pred = rollout(x, u, horizon)
 
-        loss = criterion(pred, y)
+        target = y.unsqueeze(1).repeat(1, horizon, 1)
+
+        loss = criterion(pred, target)
 
         loss.backward()
 
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
         optimizer.step()
 
-        preds.append(pred.detach().cpu().numpy())
-        targets.append(y.cpu().numpy())
+        preds_all.append(pred[:, -1].detach().cpu().numpy())
+        targets_all.append(y.cpu().numpy())
 
-    preds = np.vstack(preds)
-    targets = np.vstack(targets)
+    preds_all = np.vstack(preds_all)
+    targets_all = np.vstack(targets_all)
 
-    r2 = r2_score(targets, preds)
+    r2 = r2_score(targets_all, preds_all)
 
-    print(f"Epoch {epoch + 1} | R2 {r2:.4f}")
+    print(f"Epoch {epoch + 1} | Horizon {horizon} | R2 {r2:.4f}")

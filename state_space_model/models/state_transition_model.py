@@ -12,6 +12,8 @@ class StateTransitionModel(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden, hidden),
             nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
             nn.Linear(hidden, state_dim),
         )
 
