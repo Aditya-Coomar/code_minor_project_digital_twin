@@ -96,7 +96,7 @@ criterion = nn.MSELoss()
 def rollout_schedule(epoch):
     if epoch < WARMUP_EPOCHS:
         return 1
-    return min(1 + (epoch - WARMUP_EPOCHS) // 8, MAX_HORIZON)
+    return min(1 + (epoch - WARMUP_EPOCHS) // 6, MAX_HORIZON)
 
 
 # ==========================================================
@@ -144,9 +144,11 @@ for epoch in range(EPOCHS):
         # ======================================================
         # Pure autoregressive multi-step rollout
         # Each step: x_pred = x_prev + delta(z, x_prev)
+        # Also collects latent states for consistency loss
         # ======================================================
 
         preds_seq = []
+        z_states = [z]  # collect z at each step for latent consistency
         z_roll = z
         x_prev = x_current
 
@@ -155,6 +157,7 @@ for epoch in range(EPOCHS):
             z_roll = model.dynamics(z_roll, u_t)
             x_pred = model.decoder(z_roll, x_prev)
             preds_seq.append(x_pred)
+            z_states.append(z_roll)
             x_prev = x_pred
 
         preds_seq = torch.stack(preds_seq, dim=1)
@@ -167,15 +170,15 @@ for epoch in range(EPOCHS):
 
         # ======================================================
         # Multi-step latent consistency loss
+        # Reuses z_states from rollout (no redundant dynamics pass)
         # CRITICAL: targets fully detached
         # ======================================================
 
         latent_loss = torch.tensor(0.0, device=DEVICE)
         n_consistency = min(LATENT_CONSISTENCY_STEPS, horizon)
 
-        z_pred = z
         for t in range(n_consistency):
-            z_pred = model.dynamics(z_pred, u_future[:, t])
+            z_pred_t = z_states[t + 1]  # dynamics output at step t
 
             with torch.no_grad():
                 shift = t + 1
@@ -187,7 +190,7 @@ for epoch in range(EPOCHS):
                 )
                 z_target = model.encoder(next_hist, next_u)
 
-            latent_loss = latent_loss + criterion(z_pred, z_target)
+            latent_loss = latent_loss + criterion(z_pred_t, z_target)
 
         latent_loss = latent_loss / n_consistency
 

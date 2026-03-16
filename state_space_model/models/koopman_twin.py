@@ -15,7 +15,8 @@ class HistoryEncoder(nn.Module):
         self.input_proj = nn.Linear(state_dim + control_dim, latent)
 
         self.gru = nn.GRU(
-            latent, latent // 2, num_layers=2, batch_first=True, bidirectional=True
+            latent, latent // 2, num_layers=2, batch_first=True,
+            bidirectional=True, dropout=0.1,
         )
 
         self.out_proj = nn.Sequential(
@@ -54,6 +55,7 @@ class KoopmanDynamics(nn.Module):
         self.residual = nn.Sequential(
             nn.Linear(latent + control_dim, 512),
             nn.GELU(),
+            nn.Dropout(0.1),
             nn.Linear(512, 256),
             nn.GELU(),
             nn.Linear(256, latent),
@@ -89,6 +91,7 @@ class ResidualDecoder(nn.Module):
         self.delta_net = nn.Sequential(
             nn.Linear(latent + state_dim, 512),
             nn.GELU(),
+            nn.Dropout(0.1),
             nn.Linear(512, 256),
             nn.GELU(),
             nn.Linear(256, state_dim),
