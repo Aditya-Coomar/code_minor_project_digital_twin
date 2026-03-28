@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import streamlit as st
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -27,7 +28,8 @@ st.set_page_config(
 # ─────────────────────────────────────────────
 # CUSTOM CSS  (light, professional, clinical)
 # ─────────────────────────────────────────────
-st.markdown("""
+st.markdown(
+    """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
@@ -126,26 +128,29 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 }
 .arch-block p { margin: 0; font-size: 0.85rem; color: #475569; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # ─────────────────────────────────────────────
 # CONSTANTS / PATHS
 # ─────────────────────────────────────────────
 DIR = os.path.dirname(os.path.abspath(__file__))
-DIAG      = os.path.join(DIR, "diagnostics")
-METRICS   = os.path.join(DIAG, "metrics")
-SCATTER   = os.path.join(DIAG, "prediction_scatter")
-TS        = os.path.join(DIAG, "prediction_timeseries")
-RESHIST   = os.path.join(DIAG, "residual_histograms")
-RESACORR  = os.path.join(DIAG, "residual_autocorr")
-ROLLOUT   = os.path.join(DIAG, "rollout")
-LATENT    = os.path.join(DIAG, "latent_analysis")
-MODEL_PT  = os.path.join(DIR, "koopman_twin_best.pt")
+DIAG = os.path.join(DIR, "diagnostics")
+METRICS = os.path.join(DIAG, "metrics")
+SCATTER = os.path.join(DIAG, "prediction_scatter")
+TS = os.path.join(DIAG, "prediction_timeseries")
+RESHIST = os.path.join(DIAG, "residual_histograms")
+RESACORR = os.path.join(DIAG, "residual_autocorr")
+ROLLOUT = os.path.join(DIAG, "rollout")
+LATENT = os.path.join(DIAG, "latent_analysis")
+MODEL_PT = os.path.join(DIR, "koopman_twin_best.pt")
 
-SENSOR_NAMES  = [f"xmeas_{i}" for i in range(1, 42)]
-CONTROL_NAMES = [f"xmv_{i}"   for i in range(1, 12)]
+SENSOR_NAMES = [f"xmeas_{i}" for i in range(1, 42)]
+CONTROL_NAMES = [f"xmv_{i}" for i in range(1, 12)]
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 # ─────────────────────────────────────────────
 # MODEL DEFINITIONS  (mirror of models/)
@@ -154,64 +159,91 @@ class HistoryEncoder(nn.Module):
     def __init__(self, state_dim, control_dim, latent):
         super().__init__()
         self.input_proj = nn.Linear(state_dim + control_dim, latent)
-        self.gru = nn.GRU(latent, latent // 2, num_layers=2, batch_first=True,
-                          bidirectional=True, dropout=0.1)
-        self.out_proj = nn.Sequential(
-            nn.LayerNorm(latent), nn.Linear(latent, latent),
-            nn.GELU(), nn.Linear(latent, latent),
+        self.gru = nn.GRU(
+            latent,
+            latent // 2,
+            num_layers=2,
+            batch_first=True,
+            bidirectional=True,
+            dropout=0.1,
         )
+        self.out_proj = nn.Sequential(
+            nn.LayerNorm(latent),
+            nn.Linear(latent, latent),
+            nn.GELU(),
+            nn.Linear(latent, latent),
+        )
+
     def forward(self, x, u):
         inp = self.input_proj(torch.cat([x, u], dim=-1))
         out, _ = self.gru(inp)
         return self.out_proj(out[:, -1])
 
+
 class KoopmanDynamics(nn.Module):
     RESIDUAL_SCALE = 0.3
+
     def __init__(self, latent, control_dim):
         super().__init__()
         self.A = nn.Linear(latent, latent, bias=False)
         self.B = nn.Linear(control_dim, latent, bias=False)
-        self.linear_norm   = nn.LayerNorm(latent)
-        self.residual      = nn.Sequential(nn.Linear(latent + control_dim, 512), nn.GELU(),
-                                           nn.Dropout(0.1), nn.Linear(512, 256),
-                                           nn.GELU(), nn.Linear(256, latent))
+        self.linear_norm = nn.LayerNorm(latent)
+        self.residual = nn.Sequential(
+            nn.Linear(latent + control_dim, 512),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 256),
+            nn.GELU(),
+            nn.Linear(256, latent),
+        )
         self.residual_norm = nn.LayerNorm(latent)
         nn.init.orthogonal_(self.A.weight)
+
     def forward(self, z, u):
         lin = self.linear_norm(self.A(z) + self.B(u))
         res = self.residual_norm(self.residual(torch.cat([z, u], dim=-1)))
         return lin + self.RESIDUAL_SCALE * res
 
+
 class ResidualDecoder(nn.Module):
     def __init__(self, latent, state_dim):
         super().__init__()
-        self.norm      = nn.LayerNorm(latent)
-        self.delta_net = nn.Sequential(nn.Linear(latent + state_dim, 512), nn.GELU(),
-                                       nn.Dropout(0.1), nn.Linear(512, 256),
-                                       nn.GELU(), nn.Linear(256, state_dim))
+        self.norm = nn.LayerNorm(latent)
+        self.delta_net = nn.Sequential(
+            nn.Linear(latent + state_dim, 512),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 256),
+            nn.GELU(),
+            nn.Linear(256, state_dim),
+        )
         nn.init.zeros_(self.delta_net[-1].weight)
         nn.init.zeros_(self.delta_net[-1].bias)
+
     def forward(self, z, x_ref):
         z = self.norm(z)
         return x_ref + self.delta_net(torch.cat([z, x_ref], dim=-1))
 
+
 class KoopmanTwin(nn.Module):
     def __init__(self, state_dim, control_dim, latent=256):
         super().__init__()
-        self.encoder  = HistoryEncoder(state_dim, control_dim, latent)
+        self.encoder = HistoryEncoder(state_dim, control_dim, latent)
         self.dynamics = KoopmanDynamics(latent, control_dim)
-        self.decoder  = ResidualDecoder(latent, state_dim)
+        self.decoder = ResidualDecoder(latent, state_dim)
+
     def rollout(self, x_hist, u_hist, u_future):
-        z      = self.encoder(x_hist, u_hist)
+        z = self.encoder(x_hist, u_hist)
         x_prev = x_hist[:, -1]
-        preds  = []
+        preds = []
         for t in range(u_future.shape[1]):
-            u      = u_future[:, t]
-            z      = self.dynamics(z, u)
+            u = u_future[:, t]
+            z = self.dynamics(z, u)
             x_pred = self.decoder(z, x_prev)
             preds.append(x_pred)
             x_prev = x_pred
         return torch.stack(preds, dim=1)
+
 
 # ─────────────────────────────────────────────
 # DATA HELPERS
@@ -219,20 +251,24 @@ class KoopmanTwin(nn.Module):
 @st.cache_data
 def load_overall_metrics():
     path = os.path.join(METRICS, "overall_metrics.txt")
-    out  = {}
+    out = {}
     if os.path.exists(path):
         with open(path) as f:
             for line in f:
                 if ":" in line:
                     k, v = line.split(":", 1)
-                    try:    out[k.strip()] = float(v.strip())
-                    except: out[k.strip()] = v.strip()
+                    try:
+                        out[k.strip()] = float(v.strip())
+                    except:
+                        out[k.strip()] = v.strip()
     return out
+
 
 @st.cache_data
 def load_sensor_metrics():
     path = os.path.join(METRICS, "per_sensor_metrics.csv")
     return pd.read_csv(path) if os.path.exists(path) else pd.DataFrame()
+
 
 @st.cache_data
 def load_dataset_shapes():
@@ -245,133 +281,184 @@ def load_dataset_shapes():
             shapes[fname] = arr.shape
     return shapes
 
+
 @st.cache_resource
 def load_model():
-    state_dim   = 41
+    state_dim = 41
     control_dim = 11
     model = KoopmanTwin(state_dim, control_dim).to(DEVICE)
     model.load_state_dict(torch.load(MODEL_PT, map_location=DEVICE))
     model.eval()
     return model
 
+
 # ─────────────────────────────────────────────
 # SMALL UI HELPERS
 # ─────────────────────────────────────────────
 def metric_card(title, value, sub=""):
     sub_html = f'<div class="sub">{sub}</div>' if sub else ""
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <div class="metric-card">
         <h4>{title}</h4>
         <div class="value">{value}</div>
         {sub_html}
-    </div>""", unsafe_allow_html=True)
+    </div>""",
+        unsafe_allow_html=True,
+    )
+
 
 def section(label):
     st.markdown(f'<div class="sec-label">{label}</div>', unsafe_allow_html=True)
 
+
 def param_row(key, val):
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <div class="param-row">
         <span class="pk">{key}</span>
         <span class="pv">{val}</span>
-    </div>""", unsafe_allow_html=True)
+    </div>""",
+        unsafe_allow_html=True,
+    )
+
 
 def fig_panel(title, img_path, use_container_width=True):
-    st.markdown(f'<div class="fig-panel"><div class="fig-cap">{title}</div></div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="fig-panel"><div class="fig-cap">{title}</div></div>',
+        unsafe_allow_html=True,
+    )
     if os.path.exists(img_path):
         st.image(img_path, use_container_width=use_container_width)
     else:
         st.caption(f"Image not found: {img_path}")
 
+
 def r2_color(r2):
-    if r2 >= 0.9:  return "#16a34a"
-    if r2 >= 0.7:  return "#ca8a04"
+    if r2 >= 0.9:
+        return "#16a34a"
+    if r2 >= 0.7:
+        return "#ca8a04"
     return "#dc2626"
+
 
 def sensor_card(name, r2):
     clr = r2_color(r2)
     bar = max(0.0, r2) * 100
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <div class="sensor-card" style="border-left-color:{clr};">
         <span class="sn" style="color:{clr};">{name}</span>
         <span class="sr2">R² = {r2:.4f}</span>
         <div class="r2bar-bg"><div class="r2bar" style="width:{bar:.1f}%;background:{clr};"></div></div>
-    </div>""", unsafe_allow_html=True)
+    </div>""",
+        unsafe_allow_html=True,
+    )
+
 
 # ═══════════════════════════════════════════════════════════
 # SIDEBAR
 # ═══════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown('<div class="sb-title">Koopman Digital Twin</div>'
-                '<div class="sb-sub">TEP Process Dashboard</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="sb-title">Koopman Digital Twin</div>'
+        '<div class="sb-sub">TEP Process Dashboard</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown("---")
 
     section("Overall Performance")
     om = load_overall_metrics()
     if om:
-        param_row("Overall R²",   f"{om.get('Overall R2',   'N/A'):.4f}" if isinstance(om.get('Overall R2'),   float) else om.get('Overall R2',   'N/A'))
-        param_row("Overall RMSE", f"{om.get('Overall RMSE', 'N/A'):.4f}" if isinstance(om.get('Overall RMSE'), float) else om.get('Overall RMSE', 'N/A'))
+        param_row(
+            "Overall R²",
+            f"{om.get('Overall R2', 'N/A'):.4f}"
+            if isinstance(om.get("Overall R2"), float)
+            else om.get("Overall R2", "N/A"),
+        )
+        param_row(
+            "Overall RMSE",
+            f"{om.get('Overall RMSE', 'N/A'):.4f}"
+            if isinstance(om.get("Overall RMSE"), float)
+            else om.get("Overall RMSE", "N/A"),
+        )
 
     section("Architecture")
-    param_row("Model",        "KoopmanTwin")
-    param_row("Encoder",      "BiGRU (2-layer)")
-    param_row("Latent dim",   "256")
-    param_row("State dim",    "41  (xmeas_1–41)")
-    param_row("Control dim",  "11  (xmv_1–11)")
-    param_row("Dynamics",     "Linear A + Res.")
-    param_row("Decoder",      "Residual δ-net")
+    param_row("Model", "KoopmanTwin")
+    param_row("Encoder", "BiGRU (2-layer)")
+    param_row("Latent dim", "256")
+    param_row("State dim", "41  (xmeas_1–41)")
+    param_row("Control dim", "11  (xmv_1–11)")
+    param_row("Dynamics", "Linear A + Res.")
+    param_row("Decoder", "Residual δ-net")
 
     section("Training Config")
-    param_row("BATCH_SIZE",    "64")
-    param_row("EPOCHS",        "200")
-    param_row("LR",            "1e-3")
-    param_row("MAX_HORIZON",   "20")
+    param_row("BATCH_SIZE", "64")
+    param_row("EPOCHS", "200")
+    param_row("LR", "1e-3")
+    param_row("MAX_HORIZON", "20")
     param_row("WARMUP_EPOCHS", "20")
-    param_row("RECON_WEIGHT",  "0.5")
-    param_row("ROLLOUT_WEIGHT","2.0")
+    param_row("RECON_WEIGHT", "0.5")
+    param_row("ROLLOUT_WEIGHT", "2.0")
     param_row("LATENT_WEIGHT", "0.3")
-    param_row("REG_WEIGHT",    "1e-4")
-    param_row("Optimizer",     "AdamW")
-    param_row("Scheduler",     "OneCycleLR")
-    param_row("Grad clip",     "1.0")
+    param_row("REG_WEIGHT", "1e-4")
+    param_row("Optimizer", "AdamW")
+    param_row("Scheduler", "OneCycleLR")
+    param_row("Grad clip", "1.0")
 
     section("Dataset")
-    param_row("Source",   "TEP FaultFree Training")
-    param_row("HISTORY",  "30 steps")
-    param_row("HORIZON",  "20 steps")
+    param_row("Source", "TEP FaultFree Training")
+    param_row("HISTORY", "30 steps")
+    param_row("HORIZON", "20 steps")
     param_row("Smooth W", "5  (uniform_filter1d)")
-    param_row("Scaling",  "StandardScaler (X & U)")
+    param_row("Scaling", "StandardScaler (X & U)")
 
     section("System")
-    dev_str = f"CUDA — {torch.cuda.get_device_name(0)}" if DEVICE.type == "cuda" else "CPU"
+    dev_str = (
+        f"CUDA — {torch.cuda.get_device_name(0)}" if DEVICE.type == "cuda" else "CPU"
+    )
     param_row("DEVICE", dev_str)
     model_exists = os.path.exists(MODEL_PT)
-    badge_cls    = "badge-ok" if model_exists else "badge-warn"
-    badge_txt    = "MODEL LOADED" if model_exists else "MODEL MISSING"
-    st.markdown(f'<span class="badge {badge_cls}">{badge_txt}</span>', unsafe_allow_html=True)
+    badge_cls = "badge-ok" if model_exists else "badge-warn"
+    badge_txt = "MODEL LOADED" if model_exists else "MODEL MISSING"
+    st.markdown(
+        f'<span class="badge {badge_cls}">{badge_txt}</span>', unsafe_allow_html=True
+    )
 
 # ═══════════════════════════════════════════════════════════
 # MAIN HEADER
 # ═══════════════════════════════════════════════════════════
 st.markdown("## Koopman Neural State Space Digital Twin &mdash; Results Dashboard")
-st.caption("Tennessee Eastman Process (TEP) · Fault-Free Training Data · 41 measured variables · 11 manipulated variables")
+st.caption(
+    "Tennessee Eastman Process (TEP) · Fault-Free Training Data · 41 measured variables · 11 manipulated variables"
+)
 
 # ═══════════════════════════════════════════════════════════
 # TABS
 # ═══════════════════════════════════════════════════════════
-(tab_overview, tab_dataset, tab_arch,
- tab_scatter, tab_ts, tab_res,
- tab_rollout, tab_latent, tab_predict) = st.tabs([
-    "📊 Overview",
-    "🗄️ Dataset",
-    "🧠 Architecture",
-    "🔵 Scatter Plots",
-    "📈 Time Series",
-    "📉 Residuals",
-    "🔄 Rollout",
-    "🌐 Latent Space",
-    "⚡ Sample Predictions",
-])
+(
+    tab_overview,
+    tab_dataset,
+    tab_arch,
+    tab_scatter,
+    tab_ts,
+    tab_res,
+    tab_rollout,
+    tab_latent,
+    tab_predict,
+) = st.tabs(
+    [
+        "📊 Overview",
+        "🗄️ Dataset",
+        "🧠 Architecture",
+        "🔵 Scatter Plots",
+        "📈 Time Series",
+        "📉 Residuals",
+        "🔄 Rollout",
+        "🌐 Latent Space",
+        "⚡ Sample Predictions",
+    ]
+)
 
 # ══════════════════════════════════════
 # TAB 1 — OVERVIEW
@@ -382,8 +469,12 @@ with tab_overview:
 
     section("Global Metrics")
     c1, c2, c3, c4 = st.columns(4)
-    with c1: metric_card("Overall R²",   f"{om.get('Overall R2',   0):.4f}", "Cross all 41 sensors")
-    with c2: metric_card("Overall RMSE", f"{om.get('Overall RMSE', 0):.4f}", "Scaled units")
+    with c1:
+        metric_card(
+            "Overall R²", f"{om.get('Overall R2', 0):.4f}", "Cross all 41 sensors"
+        )
+    with c2:
+        metric_card("Overall RMSE", f"{om.get('Overall RMSE', 0):.4f}", "Scaled units")
     with c3:
         avg_r2 = df["r2"].mean() if not df.empty else 0
         metric_card("Mean Sensor R²", f"{avg_r2:.4f}", "Arithmetic mean")
@@ -398,11 +489,11 @@ with tab_overview:
     if not df.empty:
         df_sorted = df.sort_values("r2", ascending=False).reset_index(drop=True)
         st.dataframe(
-            df_sorted.style
-                .format({"r2": "{:.4f}", "rmse": "{:.4f}"})
-                .background_gradient(subset=["r2"], cmap="RdYlGn", vmin=0, vmax=1)
-                .background_gradient(subset=["rmse"], cmap="RdYlGn_r", vmin=0, vmax=1),
-            use_container_width=True, height=450,
+            df_sorted.style.format({"r2": "{:.4f}", "rmse": "{:.4f}"})
+            .background_gradient(subset=["r2"], cmap="RdYlGn", vmin=0, vmax=1)
+            .background_gradient(subset=["rmse"], cmap="RdYlGn_r", vmin=0, vmax=1),
+            use_container_width=True,
+            height=450,
         )
     else:
         st.info("per_sensor_metrics.csv not found.")
@@ -417,19 +508,23 @@ with tab_dataset:
     if fa in shapes:
         n, h, s = shapes[fa]
         c1, c2, c3, c4 = st.columns(4)
-        with c1: metric_card("Total Samples",    f"{n:,}")
-        with c2: metric_card("History Window",   f"{h} steps")
-        with c3: metric_card("State Dim (xmeas)",f"{s}")
+        with c1:
+            metric_card("Total Samples", f"{n:,}")
+        with c2:
+            metric_card("History Window", f"{h} steps")
+        with c3:
+            metric_card("State Dim (xmeas)", f"{s}")
         ctrl_dim = shapes["U_hist.npy"][-1] if "U_hist.npy" in shapes else 11
-        with c4: metric_card("Control Dim (xmv)", f"{ctrl_dim}")
+        with c4:
+            metric_card("Control Dim (xmv)", f"{ctrl_dim}")
     else:
         st.info("Dataset .npy files not found in this folder.")
 
     section("Array Shapes")
     rows = []
     for fname, desc in [
-        ("X_hist.npy",   "State history window   [N, HISTORY=30, 41]"),
-        ("U_hist.npy",   "Control history window [N, HISTORY=30, 11]"),
+        ("X_hist.npy", "State history window   [N, HISTORY=30, 41]"),
+        ("U_hist.npy", "Control history window [N, HISTORY=30, 11]"),
         ("U_future.npy", "Future controls        [N, HORIZON=20, 11]"),
         ("Y_future.npy", "Future states (target) [N, HORIZON=20, 41]"),
     ]:
@@ -450,7 +545,8 @@ with tab_dataset:
             st.markdown(f"<code>{cn}</code>", unsafe_allow_html=True)
 
     section("Preprocessing Pipeline")
-    st.markdown("""
+    st.markdown(
+        """
     <div class="code-block">1. Load  TEP_FaultFree_Training.RData
 2. Detect simulation-run column (simulationRun)
 3. Extract  xmeas_* → X_raw  (41 cols)   and   xmv_* → U_raw  (11 cols)
@@ -463,7 +559,9 @@ with tab_dataset:
        U_future [ i          : i+HORIZON ] (20 × 11)
        Y_future [ i          : i+HORIZON ] (20 × 41)
 8. Save as float32 .npy arrays</div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
 # ══════════════════════════════════════
 # TAB 3 — ARCHITECTURE
@@ -476,7 +574,8 @@ with tab_arch:
     > next state via a *residual delta decoder*.
     """)
 
-    st.markdown("""
+    st.markdown(
+        """
     <div class="arch-block">
         <h5>1 · HistoryEncoder</h5>
         <p>Bidirectional GRU (2 layers, hidden = latent//2 each dir → concatenated = latent = 256).
@@ -501,10 +600,13 @@ with tab_arch:
         x_prev is updated to x_pred (fully autoregressive).
         Curriculum warmup: horizon fixed at 1 for first 20 epochs, then ramps by 1 every 6 epochs up to MAX_HORIZON=20.</p>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     section("Loss Function")
-    st.markdown("""
+    st.markdown(
+        """
     <div class="code-block">Total = RECON_WEIGHT  × recon_loss       (0.50 × MSE of x̂_{-1})
        + ROLLOUT_WEIGHT × rollout_loss     (2.00 × autoregressive multi-step MSE)
        + LATENT_WEIGHT  × latent_loss      (0.30 × latent-consistency over 3 steps)
@@ -514,7 +616,9 @@ Optimizer  : AdamW  (lr=1e-3, weight_decay=1e-5)
 Scheduler  : OneCycleLR (max_lr=1e-3, pct_start=0.05, anneal='cos')
 Grad clip  : max_norm = 1.0
 Saved when : R² on last rollout step improves</div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     section("Parameter Count")
     if os.path.exists(MODEL_PT):
@@ -524,8 +628,10 @@ Saved when : R² on last rollout step improves</div>
                 total = sum(p.numel() for p in m.parameters())
                 trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
                 c1, c2 = st.columns(2)
-                with c1: metric_card("Total Parameters",     f"{total:,}")
-                with c2: metric_card("Trainable Parameters", f"{trainable:,}")
+                with c1:
+                    metric_card("Total Parameters", f"{total:,}")
+                with c2:
+                    metric_card("Trainable Parameters", f"{trainable:,}")
             except Exception as e:
                 st.warning(f"Could not count: {e}")
     else:
@@ -538,8 +644,11 @@ with tab_scatter:
     df_s = load_sensor_metrics()
     section("Predicted vs True — Scatter Plots (4000 samples per sensor)")
 
-    sensor_filter = st.selectbox("Filter sensors", ["All sensors", "R² ≥ 0.90", "R² ≥ 0.70", "R² < 0.70"],
-                                  key="scatter_filter")
+    sensor_filter = st.selectbox(
+        "Filter sensors",
+        ["All sensors", "R² ≥ 0.90", "R² ≥ 0.70", "R² < 0.70"],
+        key="scatter_filter",
+    )
 
     sensors_to_show = SENSOR_NAMES
     if not df_s.empty and sensor_filter != "All sensors":
@@ -575,7 +684,9 @@ with tab_ts:
 
     sensor_sel = st.multiselect(
         "Select sensors (leave empty = show all)",
-        SENSOR_NAMES, default=[], key="ts_select"
+        SENSOR_NAMES,
+        default=[],
+        key="ts_select",
     )
     sensors_show = sensor_sel if sensor_sel else SENSOR_NAMES
 
@@ -584,7 +695,7 @@ with tab_ts:
         cols = st.columns(2)
         for j, col in enumerate(cols):
             if i + j < len(sensors_show):
-                sn  = sensors_show[i + j]
+                sn = sensors_show[i + j]
                 img = os.path.join(TS, f"{sn}_timeseries.png")
                 r2v = r2_map.get(sn, float("nan"))
                 with col:
@@ -625,7 +736,7 @@ with tab_res:
         cols = st.columns(4)
         for j, col in enumerate(cols):
             if i + j < len(SENSOR_NAMES):
-                sn  = SENSOR_NAMES[i + j]
+                sn = SENSOR_NAMES[i + j]
                 img = os.path.join(RESHIST, f"{sn}_residual_hist.png")
                 with col:
                     st.caption(sn)
@@ -637,7 +748,7 @@ with tab_res:
         cols = st.columns(4)
         for j, col in enumerate(cols):
             if i + j < len(SENSOR_NAMES):
-                sn  = SENSOR_NAMES[i + j]
+                sn = SENSOR_NAMES[i + j]
                 img = os.path.join(RESACORR, f"{sn}_autocorr.png")
                 with col:
                     st.caption(sn)
@@ -660,7 +771,8 @@ with tab_rollout:
         st.info("rollout_r2_curve.png not found.")
 
     section("Rollout Curriculum Schedule")
-    st.markdown("""
+    st.markdown(
+        """
     <div class="code-block">Epoch  1–20 : horizon = 1   (warmup — single-step only)
 Epoch 21–26 : horizon = 2
 Epoch 27–32 : horizon = 3
@@ -668,7 +780,9 @@ Epoch 27–32 : horizon = 3
 Epoch 75+   : horizon = 20  (maximum)
 
 Training objective: ROLLOUT_WEIGHT × MSE(preds[:horizon], y_future[:horizon])</div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
 # ══════════════════════════════════════
 # TAB 8 — LATENT SPACE
@@ -686,11 +800,11 @@ with tab_latent:
             st.image(lat_img, use_container_width=True)
         with col_info:
             section("Encoder Details")
-            param_row("Input dim",  "state_dim + control_dim = 52")
-            param_row("Proj dim",   "256 (latent)")
+            param_row("Input dim", "state_dim + control_dim = 52")
+            param_row("Proj dim", "256 (latent)")
             param_row("GRU layers", "2 bidirectional")
             param_row("GRU hidden", "128 per direction")
-            param_row("Out dim",    "256")
+            param_row("Out dim", "256")
             param_row("OutputProj", "LN → Lin → GELU → Lin")
     else:
         st.info("latent_pca.png not found.")
@@ -706,65 +820,88 @@ with tab_predict:
     """)
 
     # Check for numpy files
-    X_path  = os.path.join(DIR, "X_hist.npy")
-    U_path  = os.path.join(DIR, "U_hist.npy")
+    X_path = os.path.join(DIR, "X_hist.npy")
+    U_path = os.path.join(DIR, "U_hist.npy")
     Uf_path = os.path.join(DIR, "U_future.npy")
-    Y_path  = os.path.join(DIR, "Y_future.npy")
+    Y_path = os.path.join(DIR, "Y_future.npy")
 
-    files_ok = all(os.path.exists(p) for p in [X_path, U_path, Uf_path, Y_path, MODEL_PT])
+    files_ok = all(
+        os.path.exists(p) for p in [X_path, U_path, Uf_path, Y_path, MODEL_PT]
+    )
 
     if not files_ok:
-        missing = [p for p in [X_path, U_path, Uf_path, Y_path, MODEL_PT] if not os.path.exists(p)]
+        missing = [
+            p
+            for p in [X_path, U_path, Uf_path, Y_path, MODEL_PT]
+            if not os.path.exists(p)
+        ]
         st.error(f"Missing required files:\n" + "\n".join(missing))
     else:
         with st.form("predict_form"):
             c1, c2, c3 = st.columns(3)
             with c1:
-                sample_idx = st.number_input("Sample index", min_value=0, max_value=99999, value=0, step=1)
+                sample_idx = st.number_input(
+                    "Sample index", min_value=0, max_value=225000, value=140, step=1
+                )
             with c2:
-                horizon = st.slider("Rollout horizon (steps)", min_value=1, max_value=20, value=10)
+                horizon = st.slider(
+                    "Rollout horizon (steps)", min_value=1, max_value=20, value=20
+                )
             with c3:
-                sensor_choice = st.selectbox("Sensor to plot", SENSOR_NAMES, index=0)
+                sensor_choice = st.selectbox("Sensor to plot", SENSOR_NAMES, index=17)
 
-            run_btn = st.form_submit_button("▶ Run Prediction", type="primary", use_container_width=True)
+            run_btn = st.form_submit_button(
+                "▶ Run Prediction", type="primary", use_container_width=True
+            )
 
         if run_btn:
             with st.spinner("Loading dataset and running rollout…"):
                 try:
                     # Load slices (memory-mapped)
-                    X_all  = np.load(X_path,  mmap_mode="r")
-                    U_all  = np.load(U_path,  mmap_mode="r")
+                    X_all = np.load(X_path, mmap_mode="r")
+                    U_all = np.load(U_path, mmap_mode="r")
                     Uf_all = np.load(Uf_path, mmap_mode="r")
-                    Y_all  = np.load(Y_path,  mmap_mode="r")
+                    Y_all = np.load(Y_path, mmap_mode="r")
 
                     n_samples = X_all.shape[0]
                     idx = int(sample_idx) % n_samples
 
-                    x_hist  = torch.tensor(X_all[idx:idx+1].copy(),  dtype=torch.float32).to(DEVICE)
-                    u_hist  = torch.tensor(U_all[idx:idx+1].copy(),  dtype=torch.float32).to(DEVICE)
-                    u_fut   = torch.tensor(Uf_all[idx:idx+1, :horizon].copy(), dtype=torch.float32).to(DEVICE)
-                    y_fut   = Y_all[idx, :horizon]   # (horizon, 41)
+                    x_hist = torch.tensor(
+                        X_all[idx : idx + 1].copy(), dtype=torch.float32
+                    ).to(DEVICE)
+                    u_hist = torch.tensor(
+                        U_all[idx : idx + 1].copy(), dtype=torch.float32
+                    ).to(DEVICE)
+                    u_fut = torch.tensor(
+                        Uf_all[idx : idx + 1, :horizon].copy(), dtype=torch.float32
+                    ).to(DEVICE)
+                    y_fut = Y_all[idx, :horizon]  # (horizon, 41)
 
                     model = load_model()
                     with torch.no_grad():
-                        preds = model.rollout(x_hist, u_hist, u_fut)   # (1, horizon, 41)
+                        preds = model.rollout(x_hist, u_hist, u_fut)  # (1, horizon, 41)
                     preds_np = preds.cpu().numpy()[0]  # (horizon, 41)
 
-                    sensor_idx  = SENSOR_NAMES.index(sensor_choice)
-                    pred_trace  = preds_np[:, sensor_idx]
-                    true_trace  = y_fut[:, sensor_idx]
+                    sensor_idx = SENSOR_NAMES.index(sensor_choice)
+                    pred_trace = preds_np[:, sensor_idx]
+                    true_trace = y_fut[:, sensor_idx]
                     from sklearn.metrics import r2_score as _r2
+
                     r2v = _r2(true_trace, pred_trace)
 
                     # ── Metric cards ──
                     section("Prediction Results")
                     mc1, mc2, mc3, mc4 = st.columns(4)
                     rmse_v = float(np.sqrt(np.mean((pred_trace - true_trace) ** 2)))
-                    mae_v  = float(np.mean(np.abs(pred_trace - true_trace)))
-                    with mc1: metric_card("Sample Index",  f"{idx:,}")
-                    with mc2: metric_card("Horizon",       f"{horizon} steps")
-                    with mc3: metric_card(f"R² ({sensor_choice})", f"{r2v:.4f}")
-                    with mc4: metric_card("RMSE (scaled)", f"{rmse_v:.4f}")
+                    mae_v = float(np.mean(np.abs(pred_trace - true_trace)))
+                    with mc1:
+                        metric_card("Sample Index", f"{idx:,}")
+                    with mc2:
+                        metric_card("Horizon", f"{horizon} steps")
+                    with mc3:
+                        metric_card(f"R² ({sensor_choice})", f"{r2v:.4f}")
+                    with mc4:
+                        metric_card("RMSE (scaled)", f"{rmse_v:.4f}")
 
                     # ── Plot ──
                     section(f"Predicted vs Target — {sensor_choice}")
@@ -773,23 +910,44 @@ with tab_predict:
                     tsteps = np.arange(horizon)
 
                     # Time series
-                    axes[0].plot(tsteps, true_trace,  lw=2, label="Target",    color="#1e40af")
-                    axes[0].plot(tsteps, pred_trace,  lw=2, label="Predicted", color="#dc2626", linestyle="--")
-                    axes[0].fill_between(tsteps, true_trace, pred_trace, alpha=0.12, color="#dc2626")
+                    axes[0].plot(
+                        tsteps, true_trace, lw=2, label="Target", color="#1e40af"
+                    )
+                    axes[0].plot(
+                        tsteps,
+                        pred_trace,
+                        lw=2,
+                        label="Predicted",
+                        color="#dc2626",
+                        linestyle="--",
+                    )
+                    axes[0].fill_between(
+                        tsteps, true_trace, pred_trace, alpha=0.12, color="#dc2626"
+                    )
                     axes[0].set_xlabel("Rollout Step")
                     axes[0].set_ylabel("Scaled Value")
                     axes[0].set_title(f"{sensor_choice} — Rollout  (R²={r2v:.4f})")
-                    axes[0].legend(); axes[0].grid(True, alpha=0.3)
+                    axes[0].legend()
+                    axes[0].grid(True, alpha=0.3)
 
                     # Scatter
                     vmin = min(true_trace.min(), pred_trace.min())
                     vmax = max(true_trace.max(), pred_trace.max())
-                    axes[1].scatter(true_trace, pred_trace, s=60, alpha=0.7, color="#3b82f6", edgecolors="white", lw=0.5)
+                    axes[1].scatter(
+                        true_trace,
+                        pred_trace,
+                        s=60,
+                        alpha=0.7,
+                        color="#3b82f6",
+                        edgecolors="white",
+                        lw=0.5,
+                    )
                     axes[1].plot([vmin, vmax], [vmin, vmax], "k--", lw=1, label="y=x")
                     axes[1].set_xlabel("True")
                     axes[1].set_ylabel("Predicted")
                     axes[1].set_title(f"{sensor_choice} — Scatter  (horizon={horizon})")
-                    axes[1].legend(); axes[1].grid(True, alpha=0.3)
+                    axes[1].legend()
+                    axes[1].grid(True, alpha=0.3)
 
                     plt.tight_layout()
                     st.pyplot(fig, use_container_width=True)
@@ -801,26 +959,37 @@ with tab_predict:
                     sample_rmse = []
                     for si in range(41):
                         r2i = float(_r2(y_fut[:, si], preds_np[:, si]))
-                        rmi = float(np.sqrt(np.mean((preds_np[:, si] - y_fut[:, si])**2)))
+                        rmi = float(
+                            np.sqrt(np.mean((preds_np[:, si] - y_fut[:, si]) ** 2))
+                        )
                         sample_r2.append(r2i)
                         sample_rmse.append(rmi)
-                    res_df = pd.DataFrame({"Sensor": SENSOR_NAMES, "R²": sample_r2, "RMSE": sample_rmse})
-                    res_df = res_df.sort_values("R²", ascending=False).reset_index(drop=True)
+                    res_df = pd.DataFrame(
+                        {"Sensor": SENSOR_NAMES, "R²": sample_r2, "RMSE": sample_rmse}
+                    )
+                    res_df = res_df.sort_values("R²", ascending=False).reset_index(
+                        drop=True
+                    )
                     st.dataframe(
-                        res_df.style
-                            .format({"R²": "{:.4f}", "RMSE": "{:.4f}"})
-                            .background_gradient(subset=["R²"], cmap="RdYlGn", vmin=0, vmax=1),
-                        use_container_width=True, height=400,
+                        res_df.style.format(
+                            {"R²": "{:.4f}", "RMSE": "{:.4f}"}
+                        ).background_gradient(
+                            subset=["R²"], cmap="RdYlGn", vmin=0, vmax=1
+                        ),
+                        use_container_width=True,
+                        height=400,
                     )
 
                 except Exception as exc:
                     st.error(f"Prediction failed: {exc}")
                     import traceback
+
                     st.code(traceback.format_exc())
 
         st.markdown("---")
         section("How to Run a Batch Prediction (Code Reference)")
-        st.code("""
+        st.code(
+            """
 import numpy as np
 import torch
 import sys, os
@@ -858,4 +1027,6 @@ target   = Y_future[idx, :horizon]  # (horizon, 41)
 
 from sklearn.metrics import r2_score
 print("R²:", r2_score(target, preds_np))
-        """, language="python")
+        """,
+            language="python",
+        )
